@@ -7,29 +7,31 @@ const split = require('haxe-modular/tool/bin/split');
 const hooks = require('haxe-modular/bin/hooks');
 const JSAsset = require('parcel-bundler/src/assets/JSAsset');
 
-const cache = Object.create(null);
-// resolve hooks once
-const graphHooks = hooks.getGraphHooks();
-
 class HaxeAsset extends JSAsset {
-    constructor(name, pkg, options) {
-        super(name, pkg, options);
-        debugger;
-    }
 
-    mightHaveDependencies() {
-        return true;
-    }
-
-    parse(asset) {
-        const { name, baseName, options } = this;
+    load() {
+        // compile Haxe project and return source for normal JS processing
+        const { name, basename, options } = this;
         const pkg = this.package;
-        console.log('PARSE', {name, baseName, pkg, options});
+
+        const queryIndex = name.indexOf('!');
+        const context = queryIndex >= 0
+            ? {
+                resourcePath: null,
+                query: name.substr(queryIndex),
+                options,
+                addContextDependency: (path) => { console.log('ADD RES', path); }
+            }
+            : {
+                resourcePath: name,
+                query: null,
+                options,
+                addContextDependency: (path) => { console.log('ADD RES', path); }
+            };
         // console.log(entryAsset.options);
 
         return new Promise((resolve, reject) => {
-            process(name, baseName, pkg, options, (err, content) => {
-                console.log(content);
+            process(context, (err, content) => {
                 if (!!err) reject(err);
                 else resolve(content);
             });
@@ -39,24 +41,12 @@ class HaxeAsset extends JSAsset {
 
 module.exports = HaxeAsset;
 
-function process(name, baseName, pkg, options, cb) {
-
-    const context = {
-        resourcePath: baseName,
-        query: '',
-        addContextDependency: (path) => { console.log('ADD RES', path); }
-    };
+function process(context, cb) {
 
     const request = context.resourcePath;
-
-    console.log('== REQUEST', request);
-
-    cb(null, 'console.log("hello loader");');
-    return;
-
     if (!request) {
         // Loader was called without specifying a hxml file
-        // Expecting a require of the form '!haxe-loader?hxmlName/moduleName!'
+        // Expecting a require of the form '!hxmlName/moduleName.hxml'
         fromCache(context, context.query, cb);
         return;
     }
@@ -64,9 +54,9 @@ function process(name, baseName, pkg, options, cb) {
     const hxmlContent = String(fs.readFileSync(request));
     const ns = path.basename(request).replace('.hxml', '');
     const jsTempFile = makeJSTempFile(ns);
-    const { jsOutputFile, classpath, args } = prepare(options, context, ns, hxmlContent, jsTempFile);
+    const { jsOutputFile, classpath, args } = prepare(context, ns, hxmlContent, jsTempFile);
 
-    registerDepencencies(context, classpath);
+    // registerDepencencies(context, classpath);
 
     // Execute the Haxe build.
     console.log('haxe', args.join(' '));
@@ -74,21 +64,8 @@ function process(name, baseName, pkg, options, cb) {
         if (err) {
             return cb(err);
         }
-
-        // If the hxml file outputs something other than client JS, we should not include it in the bundle.
-        // We're only passing it through webpack so that we get `watch` and the like to work.
-        if (!jsOutputFile) {
-            // We allow the user to configure a timeout so the server has a chance to restart before webpack triggers a page refresh.
-            var delay = options.delayForNonJsBuilds || 0;
-            setTimeout(() => {
-                // We will include a random string in the output so that the dev server notices a difference and triggers a page refresh.
-                cb(null, "// " + Math.random())
-            }, delay);
-            return;
-        }
-
         // Read the resulting JS file and return the main module
-        const processed = processOutput(ns, jsTempFile, jsOutputFile);
+        const processed = processOutput(context, ns, jsTempFile, jsOutputFile);
         if (processed) {
             updateCache(context, ns, processed, classpath);
         }
@@ -97,24 +74,39 @@ function process(name, baseName, pkg, options, cb) {
 };
 
 function updateCache(context, ns, { contentHash, results }, classpath) {
-    cache[ns] = { contentHash, results, classpath };
+    //cache[ns] = { contentHash, results, classpath };
+    const { options } = context;
+    const cacheDir = options.cacheDir;
+    if (!fs.existsSync(cacheDir)) fs.mkdirSync(cacheDir);
+
+    results.forEach(entry => {
+        const cacheFile = path.join(cacheDir, `${ns}__${entry.name}.json`);
+        fs.writeFileSync(cacheFile, JSON.stringify(entry));
+    });
 }
 
-function processOutput(ns, jsTempFile, jsOutputFile) {
-    const content = fs.readFileSync(jsTempFile.path);
+function processOutput(context, ns, jsTempFile, jsOutputFile) {
+    const { options } = context;
+
+    const content = String(fs.readFileSync(jsTempFile.path));
     // Check whether the output has changed since last build
     const contentHash = hash(content);
-    if (cache[ns] && cache[ns].hash === contentHash)
-        return null;
+    // if (cache[ns] && cache[ns].hash === contentHash)
+        // return null;
 
     // Split output
     const modules = findImports(content);
-    const debug = fs.existsSync(`${jsTempFile.path}.map`);
+    const debug = options.hmr && fs.existsSync(`${jsTempFile.path}.map`);
+    const graphHooks = hooks.getGraphHooks();
     const results = split.run(jsTempFile.path, jsOutputFile, modules, debug, true, false, false, graphHooks)
         .filter(entry => entry && entry.source);
 
-    // Inject .hx sources in map file
     results.forEach(entry => {
+        // Change 'System.import'
+        entry.source.content = entry.source.content.replace('System.import\(', 'import(');
+        // No support of maps in Parcel
+        if (entry.map) delete entry.map;
+        /* // Inject .hx sources in map file
         if (entry.map) {
             const map = entry.map.content = JSON.parse(entry.map.content);
             map.sourcesContent = map.sources.map(path => {
@@ -125,7 +117,7 @@ function processOutput(ns, jsTempFile, jsOutputFile) {
                     return '';
                 }
             });
-        }
+        }*/
     });
 
     // Delete temp files
@@ -135,44 +127,35 @@ function processOutput(ns, jsTempFile, jsOutputFile) {
 }
 
 function returnModule(context, ns, name, cb) {
-    const { results, classpath } = cache[ns];
-    if (!results.length) {
-        throw new Error(`${ns}.hxml did not emit any modules`);
-    }
+    const { options } = context;
+    const cacheDir = options.cacheDir
+    const cacheFile = path.join(cacheDir, `${ns}__${name}.json`);
 
-    const entry = results.find(entry => entry.name === name);
-    if (!entry) {
+    if (!fs.existsSync(cacheFile)) {
         throw new Error(`${ns}.hxml did not emit a module called '${name}'`);
     }
 
-    cb(null, entry.source.content, entry.map ? entry.map.content : null);
+    const cache = JSON.parse(String(fs.readFileSync(cacheFile)));
+    cb(null, cache.source.content);
 }
 
 function fromCache(context, query, cb) {
-    // To locate a split module we expect a query of the form '?hxmlName/moduleName'
-    const options = /\?([^/]+)\/(.*)/.exec(query);
-    if (!options) {
+    // To locate a split module we expect a query of the form '!hxmlName/moduleName.hxml'
+    const params = /!([^/]+)[\/\\](.*)\.hxml/.exec(query);
+    if (!params) {
         throw new Error(`Invalid query: ${query}`);
     }
-    const ns = options[1];
-    const name = options[2];
+    const ns = params[1];
+    const name = params[2];
 
-    const cached = cache[ns];
-    if (!cached) {
-        throw new Error(`${ns}.hxml is not a known entry point`);
-    }
+    // registerDepencencies(context, cached.classpath);
 
-    registerDepencencies(context, cached.classpath);
-
-    if (!cached.results.length) {
-        throw new Error(`${ns}.hxml did not emit any modules`);
-    }
     returnModule(context, ns, name, cb);
 }
 
 function findImports(content) {
     // Webpack.load() emits a call to System.import with a query to haxe-loader
-    const reImports = /System.import\("!haxe-loader\?([^!]+)/g;
+    const reImports = /import\("!([^!]+)\.hxml/g;
     const results = [];
 
     let match = reImports.exec(content);
@@ -200,7 +183,8 @@ function registerDepencencies(context, classpath) {
     classpath.forEach(path => context.addContextDependency(path));
 }
 
-function prepare(options, context, ns, hxmlContent, jsTempFile) {
+function prepare(context, ns, hxmlContent, jsTempFile) {
+    const { options } = context;
     let args = [];
     const classpath = [];
     let jsOutputFile = null;

@@ -1,6 +1,6 @@
 
 class Foo {
     public function new() {
-        trace('A new Foo');
+        trace('A new Foo!!');
     }
 }

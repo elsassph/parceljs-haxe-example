@@ -86,7 +86,7 @@ class Parcel {
 	#if macro
 	static function resolveModule(name:String) {
 		var ns = Context.definedValue('webpack_namespace');
-		return '!haxe-loader?$ns/$name!.hxml';
+		return '!${ns}/${name}.hxml';
 	}
 
 	static function rebaseRelativePath(directory:String, file:String) {

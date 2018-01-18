@@ -4,7 +4,9 @@
   "main": "index.js",
   "license": "MIT",
   "scripts": {
-    "start": "node script/start.js"
+    "clean": "rm -rf .cache && rm -rf dist",
+    "start": "node script/start.js",
+    "build": "node script/build.js"
   },
   "dependencies": {
     "hash-sum": "^1.0.2",

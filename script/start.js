@@ -1,7 +1,10 @@
 // This will all be automatic with a 'parcel-plugin-haxe' npm module
 const Bundler = require('parcel-bundler');
 
+process.env.NODE_ENV = process.env.NODE_ENV || 'development';
+
 const bundler = new Bundler('./src/index.html');
+
 bundler.addPackager('hxml', require.resolve('./HaxePackager'));
 bundler.addAssetType('hxml', require.resolve('./HaxeAsset'));
 

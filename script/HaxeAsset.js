@@ -9,6 +9,10 @@ const JSAsset = require('parcel-bundler/src/assets/JSAsset');
 
 class HaxeAsset extends JSAsset {
 
+    pretransform() {
+        return null;
+    }
+
     load() {
         // compile Haxe project and return source for normal JS processing
         const { name, basename, options } = this;
@@ -20,13 +24,13 @@ class HaxeAsset extends JSAsset {
                 resourcePath: null,
                 query: name.substr(queryIndex),
                 options,
-                addContextDependency: (path) => { console.log('ADD RES', path); }
+                addContextDependency: (path) => this.addPathDependency(path)
             }
             : {
                 resourcePath: name,
                 query: null,
                 options,
-                addContextDependency: (path) => { console.log('ADD RES', path); }
+                addContextDependency: (path) => this.addPathDependency(path)
             };
         // console.log(entryAsset.options);
 
@@ -36,6 +40,11 @@ class HaxeAsset extends JSAsset {
                 else resolve(content);
             });
         });
+    }
+
+    addPathDependency(path) {
+        if (!this.paths) this.paths = [path];
+        else this.paths.push(path);
     }
 }
 
@@ -56,7 +65,7 @@ function process(context, cb) {
     const jsTempFile = makeJSTempFile(ns);
     const { jsOutputFile, classpath, args } = prepare(context, ns, hxmlContent, jsTempFile);
 
-    // registerDepencencies(context, classpath);
+    registerDepencencies(context, classpath);
 
     // Execute the Haxe build.
     console.log('haxe', args.join(' '));
@@ -148,7 +157,7 @@ function fromCache(context, query, cb) {
     const ns = params[1];
     const name = params[2];
 
-    // registerDepencencies(context, cached.classpath);
+    //registerDepencencies(context, cached.classpath);
 
     returnModule(context, ns, name, cb);
 }

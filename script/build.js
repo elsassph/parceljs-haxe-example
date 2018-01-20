@@ -3,7 +3,7 @@ const Bundler = require('parcel-bundler');
 
 process.env.NODE_ENV = 'production';
 
-const bundler = new Bundler('./src/index.html', { publicURL:'/' });
+const bundler = new Bundler('./index.html');
 
 bundler.addPackager('hxml', require.resolve('./HaxePackager'));
 bundler.addAssetType('hxml', require.resolve('./HaxeAsset'));

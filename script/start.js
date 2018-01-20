@@ -3,7 +3,12 @@ const Bundler = require('parcel-bundler');
 
 process.env.NODE_ENV = process.env.NODE_ENV || 'development';
 
-const bundler = new Bundler('./src/index.html');
+process.on('unhandledRejection', (reason, p) => {
+    console.log('Unhandled Rejection at: Promise', p, 'reason:', reason);
+    // application specific logging, throwing an error, or other logic here
+});
+
+const bundler = new Bundler('./index.html');
 
 bundler.addPackager('hxml', require.resolve('./HaxePackager'));
 bundler.addAssetType('hxml', require.resolve('./HaxeAsset'));

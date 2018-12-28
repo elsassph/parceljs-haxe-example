@@ -9,14 +9,18 @@ const JSAsset = require('parcel-bundler/src/assets/JSAsset');
 
 class HaxeAsset extends JSAsset {
 
-    pretransform() {
-        return null;
+    async pretransform() {
+        if (this.options.sourceMaps) {
+            await this.loadSourceMap();
+        }
+        // no babel processing
     }
 
     load() {
         // compile Haxe project and return source for normal JS processing
         const { name, basename, options } = this;
-        const pkg = this.package;
+        // const pkg = this.package;
+        console.log('\n==== LOAD', name);
 
         const queryIndex = name.indexOf('!');
         const context = queryIndex >= 0
@@ -35,16 +39,25 @@ class HaxeAsset extends JSAsset {
         // console.log(entryAsset.options);
 
         return new Promise((resolve, reject) => {
-            process(context, (err, content) => {
+            process(context, (err, { content, sourceMap }) => {
+                console.log('\n== GOT CONTENT');
                 if (!!err) reject(err);
-                else resolve(content);
+                else { 
+                    this.sourceMap = sourceMap;
+                    resolve(content);
+                }
             });
         });
     }
 
-    addPathDependency(path) {
-        if (!this.paths) this.paths = [path];
-        else this.paths.push(path);
+    async loadSourceMap() {
+        console.log('\n== LOAD SOURCEMAP')
+    }
+
+    addPathDependency(classpath) {
+        console.log('ADD', classpath, path.join(classpath, '**/*.hx'));
+        this.addDependency(path.join(classpath, 'Main.hx'), { includedInParent: true });
+        this.addDependency(path.join(classpath, 'Foo.hx'), { includedInParent: true });
     }
 }
 
@@ -65,7 +78,7 @@ function process(context, cb) {
     const jsTempFile = makeJSTempFile(ns);
     const { jsOutputFile, classpath, args } = prepare(context, ns, hxmlContent, jsTempFile);
 
-    registerDepencencies(context, classpath);
+    // registerDepencencies(context, classpath);
 
     // Execute the Haxe build.
     console.log('haxe', args.join(' '));
@@ -92,6 +105,8 @@ function updateCache(context, ns, { contentHash, results }, classpath) {
         const cacheFile = path.join(cacheDir, `${ns}__${entry.name}.json`);
         fs.writeFileSync(cacheFile, JSON.stringify(entry));
     });
+
+    saveDependencies(context, ns, classpath);
 }
 
 function processOutput(context, ns, jsTempFile, jsOutputFile) {
@@ -114,10 +129,10 @@ function processOutput(context, ns, jsTempFile, jsOutputFile) {
         // Change 'System.import'
         entry.source.content = entry.source.content.replace('System.import\(', 'import(');
         // No support of maps in Parcel
-        if (entry.map) delete entry.map;
-        /* // Inject .hx sources in map file
+        //if (entry.map) delete entry.map;
+        // Inject .hx sources in map file
         if (entry.map) {
-            const map = entry.map.content = JSON.parse(entry.map.content);
+            const map = entry.map.content;
             map.sourcesContent = map.sources.map(path => {
                 try {
                     if (path.startsWith('file:///')) path = path.substr(8);
@@ -126,7 +141,7 @@ function processOutput(context, ns, jsTempFile, jsOutputFile) {
                     return '';
                 }
             });
-        }*/
+        }
     });
 
     // Delete temp files
@@ -136,16 +151,17 @@ function processOutput(context, ns, jsTempFile, jsOutputFile) {
 }
 
 function returnModule(context, ns, name, cb) {
-    const { options } = context;
-    const cacheDir = options.cacheDir
+    const { options: { cacheDir } } = context;
     const cacheFile = path.join(cacheDir, `${ns}__${name}.json`);
 
     if (!fs.existsSync(cacheFile)) {
         throw new Error(`${ns}.hxml did not emit a module called '${name}'`);
     }
 
+    registerDepencencies(context, ns);
+
     const cache = JSON.parse(String(fs.readFileSync(cacheFile)));
-    cb(null, cache.source.content);
+    cb(null, { content: cache.source.content, sourceMap: cache.map.content });
 }
 
 function fromCache(context, query, cb) {
@@ -187,9 +203,20 @@ function makeJSTempFile() {
     return { path, cleanup };
 }
 
-function registerDepencencies(context, classpath) {
-    // Listen for any changes in the classpath
-    classpath.forEach(path => context.addContextDependency(path));
+function saveDependencies(context, ns, classpath) {
+    const { options: { cacheDir } } = context;
+    const cacheFile = path.join(cacheDir, `${ns}__classpath.json`);
+    fs.writeFileSync(cacheFile, JSON.stringify(classpath));
+}
+
+function registerDepencencies(context, ns) {
+    const { options: { cacheDir } } = context;
+    const cacheFile = path.join(cacheDir, `${ns}__classpath.json`);
+    if (fs.existsSync(cacheFile)) {
+        const classpath = JSON.parse(fs.readFileSync(cacheFile));
+        // Listen for any changes in the classpath
+        classpath.forEach(path => context.addContextDependency(path));
+    }
 }
 
 function prepare(context, ns, hxmlContent, jsTempFile) {
@@ -204,7 +231,7 @@ function prepare(context, ns, hxmlContent, jsTempFile) {
     if (options.debug) {
         args.push('-debug');
     }
-    args.push('-D', `webpack_namespace=${ns}`);
+    args.push('-D', `parcel_namespace=${ns}`);
 
     // Process all of the args in the hxml file.
     for (let line of hxmlContent.split('\n')) {

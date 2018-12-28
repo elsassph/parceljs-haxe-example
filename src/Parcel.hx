@@ -42,14 +42,14 @@ class Parcel {
 				var link = macro untyped $i{module} = $p{["$s", module]};
 				return macro {
 					#if debug
-					if (untyped module.hot) {
+					/*if (untyped module.hot) {
 						untyped module.hot.accept($v{query}, function() {
 							untyped require($v{query});
 							$link;
 						});
-					}
+					}*/
 					#end
-					untyped __js__('System.import')($v{query})
+					untyped __js__('import')($v{query})
 						.then(function(exports) {
 							$link;
 							var _ = untyped $i{module}; // forced reference
@@ -76,7 +76,7 @@ class Parcel {
 		switch (name.expr) {
 			case EConst(CString(module)):
 				var query = resolveModule(module);
-				return macro untyped __js__('System.import')($v{query});
+				return macro untyped __js__('import')($v{query});
 			default:
 		}
 		Context.fatalError('A String literal is required', Context.currentPos());
@@ -85,7 +85,7 @@ class Parcel {
 
 	#if macro
 	static function resolveModule(name:String) {
-		var ns = Context.definedValue('webpack_namespace');
+		var ns = Context.definedValue('parcel_namespace');
 		return '!${ns}/${name}.hxml';
 	}
 

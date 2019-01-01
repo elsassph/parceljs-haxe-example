@@ -6,43 +6,36 @@ const hash = require('hash-sum');
 const split = require('haxe-modular/tool/bin/split');
 const hooks = require('haxe-modular/bin/hooks');
 const JSAsset = require('parcel-bundler/src/assets/JSAsset');
+const glob = require('fast-glob');
 
 class HaxeAsset extends JSAsset {
 
     async pretransform() {
-        if (this.options.sourceMaps) {
-            await this.loadSourceMap();
-        }
-        // no babel processing
+        // Nope
     }
 
     load() {
-        // compile Haxe project and return source for normal JS processing
+        // Compile Haxe project and return source for normal JS processing
         const { name, basename, options } = this;
-        // const pkg = this.package;
-        console.log('\n==== LOAD', name);
 
-        const queryIndex = name.indexOf('!');
+        const queryIndex = name.indexOf('!'); // Is a split module
         const context = queryIndex >= 0
             ? {
-                resourcePath: null,
-                query: name.substr(queryIndex),
+                query: basename.substr(1),
                 options,
                 addContextDependency: (path) => this.addPathDependency(path)
             }
             : {
                 resourcePath: name,
-                query: null,
                 options,
                 addContextDependency: (path) => this.addPathDependency(path)
             };
-        // console.log(entryAsset.options);
 
         return new Promise((resolve, reject) => {
             process(context, (err, { content, sourceMap }) => {
-                console.log('\n== GOT CONTENT');
-                if (!!err) reject(err);
-                else { 
+                if (err) {
+                    reject(err);
+                } else {
                     this.sourceMap = sourceMap;
                     resolve(content);
                 }
@@ -50,25 +43,25 @@ class HaxeAsset extends JSAsset {
         });
     }
 
-    async loadSourceMap() {
-        console.log('\n== LOAD SOURCEMAP')
-    }
-
     addPathDependency(classpath) {
-        console.log('ADD', classpath, path.join(classpath, '**/*.hx'));
-        this.addDependency(path.join(classpath, 'Main.hx'), { includedInParent: true });
-        this.addDependency(path.join(classpath, 'Foo.hx'), { includedInParent: true });
+        // Make relative glob
+        let p = path.relative(path.dirname(this.name), classpath);
+        p = path.join(p, '/**/*.hx');
+        if (p.charAt(0) !== '.') p = './' + p;
+        // Bug #2483: can't watch a glob so watch all files
+        // this.addDependency(p, { includedInParent: true });
+        glob.sync(p).forEach(file => this.addDependency(file, { includedInParent: true }));
     }
 }
 
 module.exports = HaxeAsset;
 
+/* Reusing processing logic from webpack-haxe-loader */
 function process(context, cb) {
 
     const request = context.resourcePath;
     if (!request) {
-        // Loader was called without specifying a hxml file
-        // Expecting a require of the form '!hxmlName/moduleName.hxml'
+        // Loader was called without specifying a real hxml file
         fromCache(context, context.query, cb);
         return;
     }
@@ -78,7 +71,9 @@ function process(context, cb) {
     const jsTempFile = makeJSTempFile(ns);
     const { jsOutputFile, classpath, args } = prepare(context, ns, hxmlContent, jsTempFile);
 
-    // registerDepencencies(context, classpath);
+    // In HMR scenario we need to indicate sub-modules that a build is in process
+    const lockFile = getLockFile(context, ns);
+    createLock(lockFile);
 
     // Execute the Haxe build.
     console.log('haxe', args.join(' '));
@@ -87,18 +82,17 @@ function process(context, cb) {
             return cb(err);
         }
         // Read the resulting JS file and return the main module
-        const processed = processOutput(context, ns, jsTempFile, jsOutputFile);
+        const processed = processOutput(context, jsTempFile, jsOutputFile);
         if (processed) {
             updateCache(context, ns, processed, classpath);
         }
+        releaseLock(lockFile);
         returnModule(context, ns, 'Main', cb);
     });
 };
 
-function updateCache(context, ns, { contentHash, results }, classpath) {
-    //cache[ns] = { contentHash, results, classpath };
-    const { options } = context;
-    const cacheDir = options.cacheDir;
+function updateCache(context, ns, { results }, classpath) {
+    const { options: { cacheDir } } = context;
     if (!fs.existsSync(cacheDir)) fs.mkdirSync(cacheDir);
 
     results.forEach(entry => {
@@ -109,14 +103,38 @@ function updateCache(context, ns, { contentHash, results }, classpath) {
     saveDependencies(context, ns, classpath);
 }
 
-function processOutput(context, ns, jsTempFile, jsOutputFile) {
+function getLockFile(context, ns) {
+    const { options: { cacheDir } } = context;
+    if (!fs.existsSync(cacheDir)) fs.mkdirSync(cacheDir);
+    return path.join(cacheDir, `${ns}.lock`);
+}
+
+function waitLock(lockFile) {
+    return new Promise((resolve) => {
+        if (fs.existsSync(lockFile)) {
+            let watcher = fs.watch(lockFile, () => {
+                if (!fs.existsSync(lockFile)) {
+                    watcher.close();
+                    watcher = undefined;
+                    resolve();
+                }
+            });
+        } else resolve();
+    });
+}
+
+function createLock(lockFile) {
+    fs.writeFileSync(lockFile, new Date().toString());
+}
+
+function releaseLock(lockFile) {
+    if (fs.existsSync(lockFile)) fs.unlinkSync(lockFile);
+}
+
+function processOutput(context, jsTempFile, jsOutputFile) {
     const { options } = context;
 
     const content = String(fs.readFileSync(jsTempFile.path));
-    // Check whether the output has changed since last build
-    const contentHash = hash(content);
-    // if (cache[ns] && cache[ns].hash === contentHash)
-        // return null;
 
     // Split output
     const modules = findImports(content);
@@ -126,10 +144,6 @@ function processOutput(context, ns, jsTempFile, jsOutputFile) {
         .filter(entry => entry && entry.source);
 
     results.forEach(entry => {
-        // Change 'System.import'
-        entry.source.content = entry.source.content.replace('System.import\(', 'import(');
-        // No support of maps in Parcel
-        //if (entry.map) delete entry.map;
         // Inject .hx sources in map file
         if (entry.map) {
             const map = entry.map.content;
@@ -147,7 +161,7 @@ function processOutput(context, ns, jsTempFile, jsOutputFile) {
     // Delete temp files
     jsTempFile.cleanup();
 
-    return { contentHash, results };
+    return { results };
 }
 
 function returnModule(context, ns, name, cb) {
@@ -165,28 +179,26 @@ function returnModule(context, ns, name, cb) {
 }
 
 function fromCache(context, query, cb) {
-    // To locate a split module we expect a query of the form '!hxmlName/moduleName.hxml'
-    const params = /!([^/]+)[\/\\](.*)\.hxml/.exec(query);
+    // To locate a split module we expect a query of the form 'hxmlName!moduleName.hxml'
+    const params = /([^!]+)!(.*)\.hxml/.exec(query);
     if (!params) {
         throw new Error(`Invalid query: ${query}`);
     }
     const ns = params[1];
     const name = params[2];
 
-    //registerDepencencies(context, cached.classpath);
-
-    returnModule(context, ns, name, cb);
+    waitLock(getLockFile(context, ns)).then(() => returnModule(context, ns, name, cb));
 }
 
 function findImports(content) {
-    // Webpack.load() emits a call to System.import with a query to haxe-loader
-    const reImports = /import\("!([^!]+)\.hxml/g;
+    // Parcel.load() emits a dynamic import call with a query to haxe-loader
+    const reImports = /import\("!([^.]+)\.hxml/g;
     const results = [];
 
     let match = reImports.exec(content);
     while (match) {
-        // Module reference  is of the form 'hxmlName/moduleName'
-        const name = match[1].substr(match[1].indexOf('/') + 1);
+        // Module reference is of the form 'hxmlName!moduleName'
+        const name = match[1].substr(match[1].indexOf('!') + 1);
         results.push(name);
         match = reImports.exec(content);
     }
@@ -224,11 +236,9 @@ function prepare(context, ns, hxmlContent, jsTempFile) {
     let args = [];
     const classpath = [];
     let jsOutputFile = null;
-    let mainClass = 'Main';
-    let preventJsOutput = false;
 
     // Add args that are specific to hxml-loader
-    if (options.debug) {
+    if (options.sourceMaps) {
         args.push('-debug');
     }
     args.push('-D', `parcel_namespace=${ns}`);
@@ -252,7 +262,7 @@ function prepare(context, ns, hxmlContent, jsTempFile) {
         if (space > -1) {
             let value = line.substr(space + 1).trim();
 
-            if (name === '-js' && !preventJsOutput) {
+            if (name === '-js') {
                 jsOutputFile = value;
                 args.push(jsTempFile.path);
                 continue;
@@ -262,20 +272,11 @@ function prepare(context, ns, hxmlContent, jsTempFile) {
                 classpath.push(path.resolve(value));
             }
 
-            if (name === '-D' && value == 'prevent-webpack-js-output') {
-                preventJsOutput = true;
-                if (jsOutputFile) {
-                    // If a JS output file was already set to use a webpack temp file, go back and undo that.
-                    args = args.map(arg => (arg === jsTempFile.path) ? value : arg);
-                    jsOutputFile = null;
-                }
-            }
-
             args.push(value);
         }
     }
 
-    if (options.extra) args.push(options.extra);
+    if (options.haxeExtra) args.push(options.haxeExtra);
 
     return { jsOutputFile, classpath, args };
 }
